@@ -46,6 +46,21 @@ void ngtcp2_rob_gap_del(ngtcp2_rob_gap *g, const ngtcp2_mem *mem) {
   ngtcp2_mem_free(mem, g);
 }
 
+static int ngtcp2_rob_data_new_nul(ngtcp2_rob_data **pd, uint64_t offset,
+                                   size_t chunk, const ngtcp2_mem *mem) {
+  *pd = ngtcp2_mem_malloc(mem, sizeof(ngtcp2_rob_data) + chunk);
+  if (*pd == NULL) {
+    return NGTCP2_ERR_NOMEM;
+  }
+
+  (*pd)->range.begin = offset;
+  (*pd)->range.end = offset + chunk;
+  (*pd)->begin = NULL;
+  (*pd)->end = (uint8_t*)chunk;
+
+  return 0;
+}
+
 int ngtcp2_rob_data_new(ngtcp2_rob_data **pd, uint64_t offset, size_t chunk,
                         const ngtcp2_mem *mem) {
   *pd = ngtcp2_mem_malloc(mem, sizeof(ngtcp2_rob_data) + chunk);
@@ -277,6 +292,120 @@ int ngtcp2_rob_remove_prefix(ngtcp2_rob *rob, uint64_t offset) {
   return 0;
 }
 
+void ngtcp2_rob_remove_gap(ngtcp2_rob *rob, uint64_t offset, size_t datalen) {
+  ngtcp2_rob_gap *g;
+  ngtcp2_rob_data *d, *d_next;
+  ngtcp2_ksl_it it;
+  ngtcp2_ksl_key key, old_key;
+  int rv;
+
+  it = ngtcp2_ksl_begin(&rob->gapksl);
+
+  for (; !ngtcp2_ksl_it_end(&it);) {
+    g = ngtcp2_ksl_it_get(&it);
+    if (offset + datalen <= g->range.begin) {
+      break;
+    }
+    if (offset > g->range.end) {
+      ngtcp2_ksl_it_next(&it);
+      continue;
+    }
+    if (offset <= g->range.begin && offset + datalen >= g->range.end) {
+      ngtcp2_rob_gap_del(g, rob->mem);
+      continue;
+    }
+    if (offset <= g->range.begin) {
+      g->range.begin = offset + datalen;
+    } else if (offset + datalen >= g->range.end) {
+      g->range.end = offset;
+    } else {
+      ngtcp2_rob_gap *new_g;
+      rv = ngtcp2_rob_gap_new (&new_g, offset + datalen, g->range.end,
+                               rob->mem);
+      if (rv != 0) {
+        return;
+      }
+      g->range.end = offset;
+      ngtcp2_ksl_insert(&rob->gapksl, &it, ngtcp2_ksl_key_ptr(&key, &g->range),
+                        new_g);
+    }
+    ngtcp2_ksl_it_next(&it);
+  }
+
+  // Find insert/append point for nul data
+  it = ngtcp2_ksl_begin(&rob->dataksl);
+
+  for (; !ngtcp2_ksl_it_end(&it);) {
+    d = ngtcp2_ksl_it_get(&it);
+    uintptr_t d_dlen = (uintptr_t)(d->end) - (uintptr_t)(d->begin);
+    uint64_t d_offset = d->range.begin;
+    if (offset < d_offset || (offset >= d_offset && offset < d_offset + d_dlen)) {
+      break;
+    }
+    ngtcp2_ksl_it_next(&it);
+  }
+
+  if (!d || offset < d->range.begin) {
+    // insert new nul data
+    size_t new_datalen = datalen;
+    ngtcp2_rob_data *new_data;
+
+    if (d && datalen > d->range.begin - offset) {
+      new_datalen = d->range.begin - offset;
+    }
+
+    rv = ngtcp2_rob_data_new_nul (&new_data, offset, new_datalen, rob->mem);
+    if (rv != 0) {
+      return;
+    }
+    ngtcp2_ksl_it_next(&it);
+    d = ngtcp2_ksl_it_get(&it);
+  } else if (!d->begin) {
+    if (d->end < offset + (uint8_t*)datalen - d->range.begin) {
+      d->end = offset + (uint8_t*)datalen - d->range.begin;
+    }
+  } else {
+    uintptr_t d_dlen = (uintptr_t)(d->end) - (uintptr_t)(d->begin);
+    // fit new nul data entry around existing non-nul data
+    if (d->range.begin + d_dlen < offset + datalen) {
+      size_t new_datalen = datalen;
+      ngtcp2_rob_data *new_data;
+
+      if (d->range.begin + d_dlen > offset) {
+        new_datalen -= d->range.begin + d_dlen - offset;
+        offset = d->range.begin + d_dlen;
+      }
+
+      rv = ngtcp2_rob_data_new_nul (&new_data, offset, new_datalen, rob->mem);
+      if (rv != 0) {
+        return;
+      }
+
+      ngtcp2_ksl_insert(&rob->dataksl, &it, ngtcp2_ksl_key_ptr(&key, &d->range),
+          new_data);
+    }
+  }
+
+  // merge with or trim by next entry if adjacent or overlapping
+  ngtcp2_ksl_it_next(&it);
+  d_next = ngtcp2_ksl_it_get(&it);
+  if (d_next && d->range.begin + ((uintptr_t)d->end - (uintptr_t)d->begin)
+      >= d_next->range.begin) {
+    if (!d_next->begin) {
+      // merge
+      if (d->range.begin + d->end < d_next->range.begin + d_next->end) {
+        d->end = d_next->end + d_next->range.begin - d->range.begin;
+      }
+      ngtcp2_ksl_remove(&rob->dataksl, &it, ngtcp2_ksl_key_ptr(&key, &d->range));
+    } else {
+      // trim
+      if (d->range.begin + d->end > (uint8_t*)d_next->range.begin) {
+        d->end = (uint8_t*)d_next->range.begin - d->range.begin;
+      }
+    }
+  }
+}
+
 size_t ngtcp2_rob_data_at(ngtcp2_rob *rob, const uint8_t **pdest,
                           uint64_t offset) {
   ngtcp2_rob_gap *g;
@@ -301,7 +430,11 @@ size_t ngtcp2_rob_data_at(ngtcp2_rob *rob, const uint8_t **pdest,
   assert(d->range.begin <= offset);
   assert(offset < d->range.begin + rob->chunk);
 
-  *pdest = d->begin + (offset - d->range.begin);
+  if (d->begin) {
+    *pdest = d->begin + (offset - d->range.begin);
+  } else {
+    *pdest = NULL;
+  }
 
   return ngtcp2_min(g->range.begin, d->range.begin + rob->chunk) - offset;
 }

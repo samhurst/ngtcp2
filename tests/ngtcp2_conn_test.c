@@ -349,6 +349,7 @@ static void server_default_settings(ngtcp2_settings *settings) {
   for (i = 0; i < NGTCP2_STATELESS_RESET_TOKENLEN; ++i) {
     settings->stateless_reset_token[i] = (uint8_t)i;
   }
+  settings->flags = NGTCP2_SETTINGS_FLAG_NONE;
 }
 
 static void client_default_settings(ngtcp2_settings *settings) {
@@ -365,6 +366,7 @@ static void client_default_settings(ngtcp2_settings *settings) {
   settings->max_packet_size = 65535;
   settings->stateless_reset_token_present = 0;
   settings->active_connection_id_limit = 8;
+  settings->flags = NGTCP2_SETTINGS_FLAG_NONE;
 }
 
 static void setup_default_server(ngtcp2_conn **pconn) {

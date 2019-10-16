@@ -64,6 +64,10 @@ typedef enum {
   /* NGTCP2_STRM_FLAG_RST_ACKED indicates that the outgoing RST_STREAM
      is acknowledged by peer. */
   NGTCP2_STRM_FLAG_RST_ACKED = 0x20,
+  /* NGTCP2_STRM_FLAG_UNORDERED_DATA indicates that the stream data should be
+   * returned to the application as soon as it is available, without reordering
+   * the data into sequence. */
+  NGTCP2_STRM_FLAG_UNORDERED_DATA = 0x40,
 } ngtcp2_strm_flags;
 
 struct ngtcp2_strm;

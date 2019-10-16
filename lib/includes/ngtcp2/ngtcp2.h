@@ -493,6 +493,11 @@ typedef struct {
    ngtcp2_conn_server_new. */
 typedef void (*ngtcp2_printf)(void *user_data, const char *format, ...);
 
+typedef enum {
+  NGTCP2_SETTINGS_FLAG_NONE = 0x0u,
+  NGTCP2_SETTINGS_FLAG_UNORDERED_DATA = 0x1u
+} ngtcp2_settings_flags;
+
 typedef struct {
   ngtcp2_preferred_addr preferred_address;
   /* initial_ts is an initial timestamp given to the library. */
@@ -533,6 +538,7 @@ typedef struct {
   uint8_t disable_migration;
   ngtcp2_duration max_ack_delay;
   uint8_t preferred_address_present;
+  ngtcp2_settings_flags flags;
 } ngtcp2_settings;
 
 /**
